@@ -22,22 +22,36 @@ public sealed class AnatomyViewer : MonoBehaviour
 
     private Vector3 initialScale;
     private Quaternion initialRotation;
+    private Vector3 initialPosition;
     private Vector3 previousMousePosition;
 
     private float zoomFactor = 1f;
+
+    // Manipulação do modelo.
+    private bool mouseDragging;
+    private bool controllerDragging;
+    private bool previousGrip;
+
+    private Plane dragPlane;
+    private Vector3 dragOffset;
 
     private bool dissected;
     private bool isolated;
     private bool previousTrigger;
     private bool previousRightPrimary;
     private bool previousLeftPrimary;
+
     private AnatomyHudController hudController;
 
     public Camera ViewerCamera => viewerCamera;
 
+    public bool IsManipulating =>
+        mouseDragging || controllerDragging;
+
     private void Awake()
     {
         hudController = GetComponent<AnatomyHudController>();
+
         if (hudController == null)
         {
             hudController = gameObject.AddComponent<AnatomyHudController>();
@@ -98,11 +112,15 @@ public sealed class AnatomyViewer : MonoBehaviour
         {
             initialScale = modelRoot.localScale;
             initialRotation = modelRoot.localRotation;
+            initialPosition = modelRoot.localPosition;
         }
 
         zoomFactor = 1f;
         dissected = false;
         isolated = false;
+
+        mouseDragging = false;
+        controllerDragging = false;
 
         if (parts.Length > 0)
         {
@@ -142,24 +160,57 @@ public sealed class AnatomyViewer : MonoBehaviour
         }
     }
 
+    // ==========================================
+    // CONTROLES DO MOUSE
+    // ==========================================
+
     private void HandleDesktopInput()
     {
         if (viewerCamera == null || modelRoot == null)
             return;
 
-        // Selecionar uma estrutura com o botão esquerdo.
+        // Botão esquerdo: movimentar o modelo inteiro.
         if (Input.GetMouseButtonDown(0))
         {
-            if (EventSystem.current == null ||
-                !EventSystem.current.IsPointerOverGameObject())
+            bool overUI = EventSystem.current != null &&
+                          EventSystem.current.IsPointerOverGameObject();
+
+            if (!overUI)
             {
-                SelectFromRay(
-                    viewerCamera.ScreenPointToRay(Input.mousePosition)
+                Ray ray = viewerCamera.ScreenPointToRay(
+                    Input.mousePosition
                 );
+
+                if (TryGetModelBounds(ray, out Vector3 hitPoint))
+                {
+                    BeginDrag(
+                        ray,
+                        hitPoint,
+                        viewerCamera.transform.forward
+                    );
+
+                    mouseDragging = true;
+                }
             }
         }
 
-        // Rotacionar segurando o botão direito.
+        // Continuar movimentando enquanto segura o botão.
+        if (mouseDragging && Input.GetMouseButton(0))
+        {
+            Ray ray = viewerCamera.ScreenPointToRay(
+                Input.mousePosition
+            );
+
+            UpdateDrag(ray);
+        }
+
+        // Soltar o modelo.
+        if (Input.GetMouseButtonUp(0))
+        {
+            mouseDragging = false;
+        }
+
+        // Botão direito: rotacionar o modelo.
         if (Input.GetMouseButtonDown(1))
         {
             previousMousePosition = Input.mousePosition;
@@ -231,6 +282,78 @@ public sealed class AnatomyViewer : MonoBehaviour
         }
     }
 
+    // ==========================================
+    // DETECÇÃO VISUAL DO MODELO
+    // ==========================================
+
+    private bool TryGetModelBounds(
+        Ray ray,
+        out Vector3 hitPoint)
+    {
+        hitPoint = Vector3.zero;
+
+        if (modelRoot == null)
+            return false;
+
+        Renderer[] renderers =
+            modelRoot.GetComponentsInChildren<Renderer>(true);
+
+        if (renderers.Length == 0)
+            return false;
+
+        Bounds modelBounds = renderers[0].bounds;
+
+        for (int i = 1; i < renderers.Length; i++)
+        {
+            modelBounds.Encapsulate(renderers[i].bounds);
+        }
+
+        if (modelBounds.IntersectRay(ray, out float distance))
+        {
+            hitPoint = ray.GetPoint(distance);
+            return true;
+        }
+
+        return false;
+    }
+
+    // ==========================================
+    // MOVIMENTAÇÃO DO MODELO
+    // ==========================================
+
+    private void BeginDrag(
+        Ray ray,
+        Vector3 hitPoint,
+        Vector3 planeNormal)
+    {
+        if (modelRoot == null)
+            return;
+
+        dragPlane = new Plane(
+            planeNormal.normalized,
+            hitPoint
+        );
+
+        dragOffset = modelRoot.position - hitPoint;
+    }
+
+    private void UpdateDrag(Ray ray)
+    {
+        if (modelRoot == null)
+            return;
+
+        if (dragPlane.Raycast(ray, out float distance))
+        {
+            Vector3 targetPoint = ray.GetPoint(distance);
+
+            modelRoot.position = targetPoint + dragOffset;
+        }
+    }
+
+    // ==========================================
+    // CONTROLES DO META QUEST 3
+    // ==========================================
+
     private void HandleControllerInput()
     {
         if (!rightController.isValid)
@@ -245,6 +368,43 @@ public sealed class AnatomyViewer : MonoBehaviour
                 InputDevices.GetDeviceAtXRNode(XRNode.LeftHand);
         }
 
+        // Grip direito: pegar e movimentar o modelo.
+        bool gripPressed =
+            rightController.TryGetFeatureValue(
+                CommonUsages.gripButton,
+                out bool gripButton) && gripButton;
+
+        if (gripPressed && !previousGrip &&
+            TryGetControllerRay(rightController, out Ray gripRay))
+        {
+            if (TryGetModelBounds(gripRay, out Vector3 hitPoint))
+            {
+                Vector3 planeNormal = viewerCamera != null
+                    ? viewerCamera.transform.forward
+                    : gripRay.direction;
+
+                BeginDrag(gripRay, hitPoint, planeNormal);
+
+                controllerDragging = true;
+            }
+        }
+
+        // Movimentar enquanto segura o Grip.
+        if (gripPressed && controllerDragging &&
+            TryGetControllerRay(rightController, out Ray movementRay))
+        {
+            UpdateDrag(movementRay);
+        }
+
+        // Soltou o Grip.
+        if (!gripPressed)
+        {
+            controllerDragging = false;
+        }
+
+        previousGrip = gripPressed;
+
+        // Gatilho direito: selecionar ou interagir com o menu.
         bool triggerPressed =
             rightController.TryGetFeatureValue(
                 CommonUsages.triggerButton,
@@ -262,6 +422,7 @@ public sealed class AnatomyViewer : MonoBehaviour
 
         previousTrigger = triggerPressed;
 
+        // Botão principal direito: dissecação.
         bool rightPrimaryPressed =
             rightController.TryGetFeatureValue(
                 CommonUsages.primaryButton,
@@ -274,6 +435,7 @@ public sealed class AnatomyViewer : MonoBehaviour
 
         previousRightPrimary = rightPrimaryPressed;
 
+        // Botão principal esquerdo: isolamento.
         bool leftPrimaryPressed =
             leftController.TryGetFeatureValue(
                 CommonUsages.primaryButton,
@@ -286,7 +448,9 @@ public sealed class AnatomyViewer : MonoBehaviour
 
         previousLeftPrimary = leftPrimaryPressed;
 
+        // Analógico esquerdo: rotacionar.
         if (modelRoot != null &&
+            !controllerDragging &&
             leftController.TryGetFeatureValue(
                 CommonUsages.primary2DAxis,
                 out Vector2 stick) &&
@@ -336,6 +500,10 @@ public sealed class AnatomyViewer : MonoBehaviour
         controllerRay = default;
         return false;
     }
+
+    // ==========================================
+    // SELEÇÃO ANATÔMICA
+    // ==========================================
 
     private void SelectFromRay(Ray ray)
     {
@@ -396,6 +564,10 @@ public sealed class AnatomyViewer : MonoBehaviour
         }
     }
 
+    // ==========================================
+    // ZOOM E RESTAURAÇÃO
+    // ==========================================
+
     private void ScaleModel(float amount)
     {
         if (modelRoot == null)
@@ -416,10 +588,14 @@ public sealed class AnatomyViewer : MonoBehaviour
         isolated = false;
         zoomFactor = 1f;
 
+        mouseDragging = false;
+        controllerDragging = false;
+
         if (modelRoot != null)
         {
             modelRoot.localScale = initialScale;
             modelRoot.localRotation = initialRotation;
+            modelRoot.localPosition = initialPosition;
         }
 
         foreach (AnatomicalPart part in parts)
@@ -431,6 +607,10 @@ public sealed class AnatomyViewer : MonoBehaviour
         RefreshInformation();
         RefreshModeText();
     }
+
+    // ==========================================
+    // INFORMAÇÕES DA INTERFACE
+    // ==========================================
 
     private void RefreshInformation()
     {
