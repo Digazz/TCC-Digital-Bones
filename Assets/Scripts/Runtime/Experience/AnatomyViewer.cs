@@ -18,27 +18,27 @@ public sealed class AnatomyViewer : MonoBehaviour
 
     private InputDevice rightController;
     private InputDevice leftController;
-    private InputDevice headDevice;
 
     private Vector3 initialScale;
     private Quaternion initialRotation;
     private Vector3 initialPosition;
+
     private Vector3 previousMousePosition;
 
     private float zoomFactor = 1f;
 
-    // Manipulação do modelo.
     private bool mouseDragging;
     private bool controllerDragging;
-    private bool previousGrip;
 
     private Plane dragPlane;
     private Vector3 dragOffset;
 
     private bool dissected;
     private bool isolated;
+
     private bool previousTrigger;
     private bool previousRightPrimary;
+    private bool previousRightSecondary;
     private bool previousLeftPrimary;
 
     private AnatomyHudController hudController;
@@ -93,7 +93,6 @@ public sealed class AnatomyViewer : MonoBehaviour
         }
     }
 
-    // Recebe o container que contém o modelo carregado.
     public void SetModelRoot(Transform root)
     {
         if (selectedPart != null)
@@ -135,29 +134,8 @@ public sealed class AnatomyViewer : MonoBehaviour
 
     private void Update()
     {
-        HandleHeadTracking();
         HandleDesktopInput();
         HandleControllerInput();
-    }
-
-    private void HandleHeadTracking()
-    {
-        if (!headDevice.isValid)
-        {
-            headDevice = InputDevices.GetDeviceAtXRNode(XRNode.Head);
-        }
-
-        if (viewerCamera != null &&
-            headDevice.TryGetFeatureValue(
-                CommonUsages.devicePosition,
-                out Vector3 headPosition) &&
-            headDevice.TryGetFeatureValue(
-                CommonUsages.deviceRotation,
-                out Quaternion headRotation))
-        {
-            viewerCamera.transform.localPosition = headPosition;
-            viewerCamera.transform.localRotation = headRotation;
-        }
     }
 
     // ==========================================
@@ -169,7 +147,6 @@ public sealed class AnatomyViewer : MonoBehaviour
         if (viewerCamera == null || modelRoot == null)
             return;
 
-        // Botão esquerdo: movimentar o modelo inteiro.
         if (Input.GetMouseButtonDown(0))
         {
             bool overUI = EventSystem.current != null &&
@@ -194,7 +171,6 @@ public sealed class AnatomyViewer : MonoBehaviour
             }
         }
 
-        // Continuar movimentando enquanto segura o botão.
         if (mouseDragging && Input.GetMouseButton(0))
         {
             Ray ray = viewerCamera.ScreenPointToRay(
@@ -204,13 +180,11 @@ public sealed class AnatomyViewer : MonoBehaviour
             UpdateDrag(ray);
         }
 
-        // Soltar o modelo.
         if (Input.GetMouseButtonUp(0))
         {
             mouseDragging = false;
         }
 
-        // Botão direito: rotacionar o modelo.
         if (Input.GetMouseButtonDown(1))
         {
             previousMousePosition = Input.mousePosition;
@@ -236,7 +210,6 @@ public sealed class AnatomyViewer : MonoBehaviour
             previousMousePosition = Input.mousePosition;
         }
 
-        // Zoom pela roda do mouse.
         float scroll = Input.mouseScrollDelta.y;
 
         if (Mathf.Abs(scroll) > 0.01f)
@@ -244,7 +217,6 @@ public sealed class AnatomyViewer : MonoBehaviour
             ScaleModel(scroll * 0.12f);
         }
 
-        // Teclas alternativas para testar o zoom.
         if (Input.GetKeyDown(KeyCode.Equals) ||
             Input.GetKeyDown(KeyCode.KeypadPlus))
         {
@@ -283,7 +255,7 @@ public sealed class AnatomyViewer : MonoBehaviour
     }
 
     // ==========================================
-    // DETECÇÃO VISUAL DO MODELO
+    // DETECÇÃO DO MODELO
     // ==========================================
 
     private bool TryGetModelBounds(
@@ -318,7 +290,7 @@ public sealed class AnatomyViewer : MonoBehaviour
     }
 
     // ==========================================
-    // MOVIMENTAÇÃO DO MODELO
+    // MOVIMENTAÇÃO
     // ==========================================
 
     private void BeginDrag(
@@ -351,7 +323,7 @@ public sealed class AnatomyViewer : MonoBehaviour
     }
 
     // ==========================================
-    // CONTROLES DO META QUEST 3
+    // CONTROLES META QUEST 3
     // ==========================================
 
     private void HandleControllerInput()
@@ -368,43 +340,62 @@ public sealed class AnatomyViewer : MonoBehaviour
                 InputDevices.GetDeviceAtXRNode(XRNode.LeftHand);
         }
 
-        // Grip direito: pegar e movimentar o modelo.
-        bool gripPressed =
-            rightController.TryGetFeatureValue(
-                CommonUsages.gripButton,
-                out bool gripButton) && gripButton;
+        // --------------------------------------
+        // CONTROLE ESQUERDO
+        // Analógico esquerdo + gatilho:
+        // movimentar o modelo.
+        // --------------------------------------
 
-        if (gripPressed && !previousGrip &&
-            TryGetControllerRay(rightController, out Ray gripRay))
+        bool leftTriggerPressed =
+            leftController.TryGetFeatureValue(
+                CommonUsages.triggerButton,
+                out bool leftTrigger) && leftTrigger;
+
+        if (modelRoot != null &&
+            leftTriggerPressed &&
+            !controllerDragging &&
+            leftController.TryGetFeatureValue(
+                CommonUsages.primary2DAxis,
+                out Vector2 leftStick) &&
+            leftStick.sqrMagnitude > 0.01f)
         {
-            if (TryGetModelBounds(gripRay, out Vector3 hitPoint))
-            {
-                Vector3 planeNormal = viewerCamera != null
-                    ? viewerCamera.transform.forward
-                    : gripRay.direction;
+            Vector3 right =
+                viewerCamera != null
+                    ? viewerCamera.transform.right
+                    : Vector3.right;
 
-                BeginDrag(gripRay, hitPoint, planeNormal);
+            Vector3 up =
+                viewerCamera != null
+                    ? viewerCamera.transform.up
+                    : Vector3.up;
 
-                controllerDragging = true;
-            }
+            Vector3 movement =
+                (right * leftStick.x + up * leftStick.y)
+                * 0.6f
+                * Time.deltaTime;
+
+            modelRoot.position += movement;
         }
 
-        // Movimentar enquanto segura o Grip.
-        if (gripPressed && controllerDragging &&
-            TryGetControllerRay(rightController, out Ray movementRay))
+        // X esquerdo: isolamento.
+        bool leftPrimaryPressed =
+            leftController.TryGetFeatureValue(
+                CommonUsages.primaryButton,
+                out bool leftPrimary) && leftPrimary;
+
+        if (leftPrimaryPressed && !previousLeftPrimary)
         {
-            UpdateDrag(movementRay);
+            ToggleIsolation();
         }
 
-        // Soltou o Grip.
-        if (!gripPressed)
-        {
-            controllerDragging = false;
-        }
+        previousLeftPrimary = leftPrimaryPressed;
 
-        previousGrip = gripPressed;
+        // --------------------------------------
+        // CONTROLE DIREITO
+        // A: selecionar e interagir com a interface.
+        // B: dissecação.
+        // --------------------------------------
 
-        // Gatilho direito: selecionar ou interagir com o menu.
         bool triggerPressed =
             rightController.TryGetFeatureValue(
                 CommonUsages.triggerButton,
@@ -422,53 +413,83 @@ public sealed class AnatomyViewer : MonoBehaviour
 
         previousTrigger = triggerPressed;
 
-        // Botão principal direito: dissecação.
+        // A direito: selecionar e interagir com o menu.
         bool rightPrimaryPressed =
             rightController.TryGetFeatureValue(
                 CommonUsages.primaryButton,
                 out bool rightPrimary) && rightPrimary;
 
-        if (rightPrimaryPressed && !previousRightPrimary)
+        if (rightPrimaryPressed && !previousRightPrimary &&
+            TryGetControllerRay(rightController, out Ray selectionRay))
         {
-            ToggleDissection();
+            if (hudController == null ||
+                !hudController.TryHandleControllerRay(selectionRay))
+            {
+                SelectFromRay(selectionRay);
+            }
         }
 
         previousRightPrimary = rightPrimaryPressed;
 
-        // Botão principal esquerdo: isolamento.
-        bool leftPrimaryPressed =
-            leftController.TryGetFeatureValue(
-                CommonUsages.primaryButton,
-                out bool leftPrimary) && leftPrimary;
+        // B direito: dissecação.
+        bool rightSecondaryPressed =
+            rightController.TryGetFeatureValue(
+                CommonUsages.secondaryButton,
+                out bool rightSecondary) && rightSecondary;
 
-        if (leftPrimaryPressed && !previousLeftPrimary)
+        if (rightSecondaryPressed && !previousRightSecondary)
         {
-            ToggleIsolation();
+            ToggleDissection();
         }
 
-        previousLeftPrimary = leftPrimaryPressed;
+        previousRightSecondary = rightSecondaryPressed;
 
-        // Analógico esquerdo: rotacionar.
+        // --------------------------------------
+        // ANALÓGICO DIREITO
+        // Sem gatilho: rotacionar.
+        // Com gatilho: aproximar/afastar.
+        // --------------------------------------
+
+        bool rightTriggerPressed =
+            rightController.TryGetFeatureValue(
+                CommonUsages.triggerButton,
+                out bool rightTrigger) && rightTrigger;
+
         if (modelRoot != null &&
             !controllerDragging &&
-            leftController.TryGetFeatureValue(
+            rightController.TryGetFeatureValue(
                 CommonUsages.primary2DAxis,
-                out Vector2 stick) &&
-            stick.sqrMagnitude > 0.04f)
+                out Vector2 rightStick) &&
+            rightStick.sqrMagnitude > 0.01f)
         {
-            modelRoot.Rotate(
-                Vector3.up,
-                -stick.x * 90f * Time.deltaTime,
-                Space.World
-            );
+            if (rightTriggerPressed)
+            {
+                // Zoom pelo eixo vertical.
+                ScaleModel(
+                    rightStick.y * 1.5f * Time.deltaTime
+                );
+            }
+            else
+            {
+                // Rotação pelo analógico direito.
+                modelRoot.Rotate(
+                    Vector3.up,
+                    -rightStick.x * 90f * Time.deltaTime,
+                    Space.World
+                );
 
-            modelRoot.Rotate(
-                Vector3.right,
-                stick.y * 90f * Time.deltaTime,
-                Space.Self
-            );
+                modelRoot.Rotate(
+                    Vector3.right,
+                    rightStick.y * 90f * Time.deltaTime,
+                    Space.Self
+                );
+            }
         }
     }
+
+    // ==========================================
+    // RAY DOS CONTROLES
+    // ==========================================
 
     private bool TryGetControllerRay(
         InputDevice controller,
@@ -537,6 +558,10 @@ public sealed class AnatomyViewer : MonoBehaviour
         RefreshInformation();
     }
 
+    // ==========================================
+    // DISSECAÇÃO E ISOLAMENTO
+    // ==========================================
+
     private void ToggleDissection()
     {
         dissected = !dissected;
@@ -552,6 +577,7 @@ public sealed class AnatomyViewer : MonoBehaviour
     private void ToggleIsolation()
     {
         isolated = !isolated;
+
         ApplyIsolation();
         RefreshModeText();
     }

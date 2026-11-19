@@ -13,6 +13,10 @@ public class AnatomyModelLoader : MonoBehaviour
 
     public AnatomyModelDefinition[] Catalog => catalog;
 
+    // Retorna a raiz do modelo atualmente carregado.
+    public Transform CurrentModelRoot =>
+        currentModel != null ? currentModel.transform : null;
+
     private void Start()
     {
         AnatomyDatabase.Initialize();
